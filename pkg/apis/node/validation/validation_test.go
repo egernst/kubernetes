@@ -17,8 +17,11 @@ limitations under the License.
 package validation
 
 import (
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/kubernetes/pkg/apis/core"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/apis/node"
 
@@ -124,5 +127,116 @@ func TestValidateRuntimeUpdate(t *testing.T) {
 				assert.Empty(t, errs)
 			}
 		})
+	}
+}
+
+func TestValidateResourceRequirements(t *testing.T) {
+	successCase := []struct {
+		Name     string
+		overhead *node.Overhead
+	}{
+		{
+			Name: "Overhead with Requests equal to Limits",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Requests: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+					Limits: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+				},
+			},
+		},
+		{
+			Name: "Overhead with only Limits",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Limits: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+				},
+			},
+		},
+		{
+			Name: "Overhead with only Requests",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Requests: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+				},
+			},
+		},
+		{
+			Name: "Overhead with Requests Less Than Limits",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Requests: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("9"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("9G"),
+					},
+					Limits: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range successCase {
+		if errs := ValidateOverhead(tc.overhead, field.NewPath("overheads")); len(errs) != 0 {
+			t.Errorf("%q unexpected error: %v", tc.Name, errs)
+		}
+	}
+
+	errorCase := []struct {
+		Name     string
+		overhead *node.Overhead
+	}{
+		{
+			Name: "Overhead with Requests Larger Than Limits",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Requests: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("10"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("10G"),
+					},
+					Limits: core.ResourceList{
+						core.ResourceName(core.ResourceCPU):    resource.MustParse("9"),
+						core.ResourceName(core.ResourceMemory): resource.MustParse("9G"),
+					},
+				},
+			},
+		},
+		{
+			Name: "Invalid Resources with Requests",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Requests: core.ResourceList{
+						core.ResourceName("my.org"): resource.MustParse("10m"),
+					},
+				},
+			},
+		},
+		{
+			Name: "Invalid Resources with Limits",
+			overhead: &node.Overhead{
+				PodFixed: &core.ResourceRequirements{
+					Limits: core.ResourceList{
+						core.ResourceName("my.org"): resource.MustParse("9m"),
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range errorCase {
+		if errs := ValidateOverhead(tc.overhead, field.NewPath("resources")); len(errs) == 0 {
+			t.Errorf("%q expected error", tc.Name)
+		}
 	}
 }

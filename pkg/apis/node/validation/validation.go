@@ -19,6 +19,7 @@ package validation
 import (
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	corevalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/apis/node"
 )
 
@@ -40,4 +41,8 @@ func ValidateRuntimeClassUpdate(new, old *node.RuntimeClass) field.ErrorList {
 	allErrs = append(allErrs, apivalidation.ValidateImmutableField(new.Handler, old.Handler, field.NewPath("handler"))...)
 
 	return allErrs
+}
+
+func ValidateOverhead(overhead *node.Overhead, fldPath *field.Path) field.ErrorList {
+	return corevalidation.ValidateResourceRequirements(overhead.PodFixed, fldPath)
 }
