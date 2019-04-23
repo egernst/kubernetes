@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -48,6 +49,18 @@ type RuntimeClass struct {
 	// The Handler must conform to the DNS Label (RFC 1123) requirements, and is
 	// immutable.
 	Handler string `json:"handler" protobuf:"bytes,2,opt,name=handler"`
+
+	// Overhead represents the resource overhead associated with running a pod for a
+	// given RuntimeClass. For more details, see
+	// https://git.k8s.io/enhancements/keps/sig-node/20190226-pod-overhead.md
+	// +optional
+	Overhead *Overhead `json:"overhead,omitempty" protobuf:"bytes,3,opt,name=overhead"`
+}
+
+// Overhead structure represents the resource overhead associated with running a pod.
+type Overhead struct {
+	//PodFixed represents the fixed resource overhead associated with running a pod.
+	PodFixed *corev1.ResourceRequirements `json:"podFixed" protobuf:"bytes,1,opt,name=podFixed"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
