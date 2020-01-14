@@ -22,6 +22,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	v1beta1 "k8s.io/api/node/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -61,6 +62,7 @@ type pausePodConfig struct {
 	Affinity                          *v1.Affinity
 	Annotations, Labels, NodeSelector map[string]string
 	Resources                         *v1.ResourceRequirements
+	RuntimeClassHandler               string
 	Tolerations                       []v1.Toleration
 	NodeName                          string
 	Ports                             []v1.ContainerPort
@@ -190,6 +192,135 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		}
 		WaitForSchedulerAfterAction(f, createPausePodAction(f, conf), ns, podName, false)
 		verifyResult(cs, podsNeededForSaturation, 1, ns)
+	})
+
+	// This test verifies we don't allow scheduling of pods in a way that sum of limits +
+	// associated overhead is greater than machine's capacity.
+	// It assumes that cluster add-on pods stay stable and cannot be run in parallel
+	// with any other test that touches Nodes or Pods.
+	// Because of this we need to have precise control on what's running in the cluster.
+	// Test scenario:
+	// 1. Find the amount CPU resources on each node.
+	// 2. Create one pod with affinity to each node that uses 70% of the node CPU.
+	// 3. Wait for the pods to be scheduled.
+	// 4. Create another pod with no affinity to any node that needs 20% of the largest node CPU for the workload and
+	//    an overhead set as 30% of the largest node CPU.
+	// 5. Make sure this additional pod is not scheduled.
+
+	ginkgo.It("validates pod overhead is considered along with resource limits of pods that are allowed to run", func() {
+		WaitForStableCluster(cs, masterNodes)
+		nodeMaxAllocatable := int64(0)
+		nodeToAllocatableMap := make(map[string]int64)
+		for _, node := range nodeList.Items {
+			nodeReady := false
+			for _, condition := range node.Status.Conditions {
+				if condition.Type == v1.NodeReady && condition.Status == v1.ConditionTrue {
+					nodeReady = true
+					break
+				}
+			}
+			if !nodeReady {
+				continue
+			}
+			// Apply node label to each node
+			framework.AddOrUpdateLabelOnNode(cs, node.Name, "node", node.Name)
+			framework.ExpectNodeHasLabel(cs, node.Name, "node", node.Name)
+			// Find allocatable amount of CPU.
+			allocatable, found := node.Status.Allocatable[v1.ResourceCPU]
+			framework.ExpectEqual(found, true)
+			nodeToAllocatableMap[node.Name] = allocatable.MilliValue()
+			if nodeMaxAllocatable < allocatable.MilliValue() {
+				nodeMaxAllocatable = allocatable.MilliValue()
+			}
+		}
+		// Clean up added labels after this test.
+		defer func() {
+			for nodeName := range nodeToAllocatableMap {
+				framework.RemoveLabelOffNode(cs, nodeName, "node")
+			}
+		}()
+
+		pods, err := cs.CoreV1().Pods(metav1.NamespaceAll).List(metav1.ListOptions{})
+		framework.ExpectNoError(err)
+		for _, pod := range pods.Items {
+			_, found := nodeToAllocatableMap[pod.Spec.NodeName]
+			if found && pod.Status.Phase != v1.PodSucceeded && pod.Status.Phase != v1.PodFailed {
+				framework.Logf("Pod %v requesting resource cpu=%vm on Node %v", pod.Name, getRequestedCPU(pod), pod.Spec.NodeName)
+				nodeToAllocatableMap[pod.Spec.NodeName] -= getRequestedCPU(pod)
+			}
+		}
+
+		ginkgo.By("Starting Pods to consume most of the cluster CPU.")
+		// Create one pod per node that requires 70% of the node remaining CPU.
+		fillerPods := []*v1.Pod{}
+		for nodeName, cpu := range nodeToAllocatableMap {
+			requestedCPU := cpu * 7 / 10
+			framework.Logf("Creating a pod which consumes cpu=%vm on Node %v", requestedCPU, nodeName)
+			fillerPods = append(fillerPods, createPausePod(f, pausePodConfig{
+				Name: "filler-pod-" + string(uuid.NewUUID()),
+				Resources: &v1.ResourceRequirements{
+					Limits: v1.ResourceList{
+						v1.ResourceCPU: *resource.NewMilliQuantity(requestedCPU, "DecimalSI"),
+					},
+					Requests: v1.ResourceList{
+						v1.ResourceCPU: *resource.NewMilliQuantity(requestedCPU, "DecimalSI"),
+					},
+				},
+				Affinity: &v1.Affinity{
+					NodeAffinity: &v1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+							NodeSelectorTerms: []v1.NodeSelectorTerm{
+								{
+									MatchExpressions: []v1.NodeSelectorRequirement{
+										{
+											Key:      "node",
+											Operator: v1.NodeSelectorOpIn,
+											Values:   []string{nodeName},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}))
+		}
+		// Wait for filler pods to schedule.
+		for _, pod := range fillerPods {
+			framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(cs, pod))
+		}
+
+		// Register a runtimeClass with overhead set as 30% of the nodeMaxAllocatable
+		rc := &v1beta1.RuntimeClass{
+			Handler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
+			Overhead: &v1beta1.Overhead{
+				PodFixed: v1.ResourceList{
+					v1.ResourceCPU: *resource.NewMilliQuantity(nodeMaxAllocatable*3/10, "DecimalSI"),
+				},
+			},
+		}
+
+		_, err = f.ClientSet.NodeV1beta1().RuntimeClasses().Create(rc)
+		framework.ExpectNoError(err, "failed to create RuntimeClass resource")
+
+		ginkgo.By("Creating another pod that requires unavailable amount of CPU.")
+		// Create another pod that requires 20% of the largest node CPU resources.
+		// This pod should remain pending as at least 70% of CPU of other nodes in
+		// the cluster are already consumed.
+		podName := "additional-pod"
+		conf := pausePodConfig{
+			RuntimeClassHandler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
+			Name:                podName,
+			Labels:              map[string]string{"name": "additional"},
+			Resources: &v1.ResourceRequirements{
+				Limits: v1.ResourceList{
+					v1.ResourceCPU: *resource.NewMilliQuantity(nodeMaxAllocatable*2/10, "DecimalSI"),
+				},
+			},
+		}
+		WaitForSchedulerAfterAction(f, createPausePodAction(f, conf), ns, podName, false)
+		verifyResult(cs, len(fillerPods), 1, ns)
+
 	})
 
 	// This test verifies we don't allow scheduling of pods in a way that sum of
@@ -627,8 +758,9 @@ func initPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
 			OwnerReferences: conf.OwnerReferences,
 		},
 		Spec: v1.PodSpec{
-			NodeSelector: conf.NodeSelector,
-			Affinity:     conf.Affinity,
+			NodeSelector:     conf.NodeSelector,
+			RuntimeClassName: &conf.RuntimeClassHandler,
+			Affinity:         conf.Affinity,
 			Containers: []v1.Container{
 				{
 					Name:  conf.Name,
