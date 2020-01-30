@@ -895,6 +895,12 @@ func (m *kubeGenericRuntimeManager) killPodWithSyncResult(pod *v1.Pod, runningPo
 			killSandboxResult.Fail(kubecontainer.ErrKillPodSandbox, err.Error())
 			klog.Errorf("Failed to stop sandbox %q", podSandbox.ID)
 		}
+
+		//
+		// if pod != nil && pod.Spec.Overhead != nil {
+		//   // decrement number of pods running with overhead
+		// }
+		//
 	}
 
 	return

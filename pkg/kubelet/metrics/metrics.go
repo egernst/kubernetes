@@ -344,6 +344,15 @@ var (
 		},
 		[]string{"runtime_handler"},
 	)
+	// RunPodSandboxOverhead is a gauge that tracks the number of Pods currently running which utilize PodOverhead,
+	RunPodSandboxOverhead = metrics.NewGauage(
+		&metrics.GaugeOpts{
+			Subsystem:      KubeletSubsystem,
+			Name:           "running_container_count",
+			Help:           "Number of containers currently running",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
 
 	// RunningPodCount is a gauge that tracks the number of Pods currently running
 	RunningPodCount = metrics.NewGauge(

@@ -29,6 +29,8 @@ import (
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/metrics"
+	"k8s.io/kubernetes/pkg/kubelet/metrics/collectors"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 )
@@ -63,6 +65,11 @@ func (m *kubeGenericRuntimeManager) createPodSandbox(pod *v1.Pod, attempt uint32
 	}
 
 	podSandBoxID, err := m.runtimeService.RunPodSandbox(podSandboxConfig, runtimeHandler)
+
+	if pod.Spec.Overhead != nil {
+		// Increment number of pods utilizing overhead
+	}
+
 	if err != nil {
 		message := fmt.Sprintf("CreatePodSandbox for pod %q failed: %v", format.Pod(pod), err)
 		klog.Error(message)
