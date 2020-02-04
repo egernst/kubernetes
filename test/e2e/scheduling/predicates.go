@@ -62,7 +62,7 @@ type pausePodConfig struct {
 	Affinity                          *v1.Affinity
 	Annotations, Labels, NodeSelector map[string]string
 	Resources                         *v1.ResourceRequirements
-	RuntimeClassHandler               string
+	RuntimeClassHandler               *string
 	Tolerations                       []v1.Toleration
 	NodeName                          string
 	Ports                             []v1.ContainerPort
@@ -291,8 +291,11 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		}
 
 		// Register a runtimeClass with overhead set as 30% of the nodeMaxAllocatable
+		handler := e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime)
+
 		rc := &v1beta1.RuntimeClass{
-			Handler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
+			ObjectMeta: metav1.ObjectMeta{Name: handler},
+			Handler: handler,
 			Overhead: &v1beta1.Overhead{
 				PodFixed: v1.ResourceList{
 					v1.ResourceCPU: *resource.NewMilliQuantity(nodeMaxAllocatable*3/10, "DecimalSI"),
@@ -309,7 +312,7 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		// the cluster are already consumed.
 		podName := "additional-pod"
 		conf := pausePodConfig{
-			RuntimeClassHandler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
+			RuntimeClassHandler: &handler,
 			Name:                podName,
 			Labels:              map[string]string{"name": "additional"},
 			Resources: &v1.ResourceRequirements{
@@ -759,7 +762,7 @@ func initPausePod(f *framework.Framework, conf pausePodConfig) *v1.Pod {
 		},
 		Spec: v1.PodSpec{
 			NodeSelector:     conf.NodeSelector,
-			RuntimeClassName: &conf.RuntimeClassHandler,
+			RuntimeClassName: conf.RuntimeClassHandler,
 			Affinity:         conf.Affinity,
 			Containers: []v1.Container{
 				{

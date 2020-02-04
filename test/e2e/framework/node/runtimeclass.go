@@ -25,19 +25,15 @@ import (
 	utilpointer "k8s.io/utils/pointer"
 )
 
-const (
-	// preconfiguredRuntimeHandler is the name of the runtime handler that is expected to be
-	// preconfigured in the test environment.
-	preconfiguredRuntimeHandler = "test-handler"
-)
-
 // PreconfiguredRuntimeClassHandler returns configured runtime handler.
 func PreconfiguredRuntimeClassHandler(handler string) string {
 	if handler == "docker" {
 		return handler
 	}
 
-	return preconfiguredRuntimeHandler
+	// test-handler is the name of the runtime handler that is expected to be
+	// preconfigured in the test environment.
+	return "test-handler"
 }
 
 // NewRuntimeClassPod returns a test pod with the given runtimeClassName
