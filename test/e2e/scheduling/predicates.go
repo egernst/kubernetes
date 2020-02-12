@@ -200,17 +200,21 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 	// with any other test that touches Nodes or Pods.
 	// Because of this we need to have precise control on what's running in the cluster.
 	// Test scenario:
-	// 1. Find the amount CPU resources on each node.
-	// 2. Create one pod with affinity to each node that uses 70% of the node CPU.
-	// 3. Wait for the pods to be scheduled.
-	// 4. Create another pod with no affinity to any node that needs 20% of the largest node CPU for the workload and
-	//    an overhead set as 30% of the largest node CPU.
+	// 1. Find the first ready node on the system, and add a fake resource for test
+	// 2. Create one with affinity to the particular node that uses 70% of the fake resource.
+	// 3. Wait for the pod to be scheduled.
+	// 4. Create another pod with affinity to the particular node that needs 20% of the fake resource and
+	//    an overhead set as 30% of the fake resource.
 	// 5. Make sure this additional pod is not scheduled.
 
 	ginkgo.It("validates pod overhead is considered along with resource limits of pods that are allowed to run", func() {
 		WaitForStableCluster(cs, masterNodes)
 		nodeMaxAllocatable := int64(0)
 		nodeToAllocatableMap := make(map[string]int64)
+		var testnode Node
+		var beardsecond v1.ResourceName = "example.com/beardsecond"
+
+		// Find the first ready node and add a fake resource to it
 		for _, node := range nodeList.Items {
 			nodeReady := false
 			for _, condition := range node.Status.Conditions {
@@ -219,24 +223,37 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 					break
 				}
 			}
-			if !nodeReady {
-				continue
-			}
-			// Apply node label to each node
-			framework.AddOrUpdateLabelOnNode(cs, node.Name, "node", node.Name)
-			framework.ExpectNodeHasLabel(cs, node.Name, "node", node.Name)
-			// Find allocatable amount of CPU.
-			allocatable, found := node.Status.Allocatable[v1.ResourceCPU]
-			framework.ExpectEqual(found, true)
-			nodeToAllocatableMap[node.Name] = allocatable.MilliValue()
-			if nodeMaxAllocatable < allocatable.MilliValue() {
-				nodeMaxAllocatable = allocatable.MilliValue()
+
+			if nodeReady {
+				// We found our lucky node:
+				framework.AddOrUpdateLabelOnNode(cs, node.Name, "test-key", node.Name)
+				framework.ExpectNodeHasLabel(cs, node.Name, "test-key", node.Name)
+				testnode = node
+				break
 			}
 		}
-		// Clean up added labels after this test.
+
+		framework.ExpectEqual(testnode != nil, true)
+
+		// update Node API object with a fake resource
+		nodeCopy := testnode.DeepCopy()
+		nodeCopy.ResourceVersion = "0"
+		nodeCopy.Status.Capacity[beardsecond] = resource.MustParse("1000")
+		testnode, err = cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+		framework.ExpectNoError(err, "unable to apply fake resource to %v", testnode.Name)
+
+		// Clean up added labels, fake resource after this test.
 		defer func() {
-			for nodeName := range nodeToAllocatableMap {
-				framework.RemoveLabelOffNode(cs, nodeName, "node")
+			framework.RemoveLabelOffNode(cs, testnode.Name, "pod-overhead-test-node")
+
+			// remove fake node resource
+			if testnode != nil {
+				nodeCopy := testnode.DeepCopy()
+				// force it to update
+				nodeCopy.ResourceVersion = "0"
+				delete(nodeCopy.Status.Capacity, beardsecond)
+				_, err := cs.CoreV1().Nodes().UpdateStatus(context.TODO(), nodeCopy, metav1.UpdateOptions{})
+				framework.ExpectNoError(err)
 			}
 		}()
 
@@ -250,52 +267,28 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 			}
 		}
 
-		ginkgo.By("Starting Pods to consume most of the cluster CPU.")
-		// Create one pod per node that requires 70% of the node remaining CPU.
-		fillerPods := []*v1.Pod{}
-		for nodeName, cpu := range nodeToAllocatableMap {
-			requestedCPU := cpu * 7 / 10
-			framework.Logf("Creating a pod which consumes cpu=%vm on Node %v", requestedCPU, nodeName)
-			fillerPods = append(fillerPods, createPausePod(f, pausePodConfig{
-				Name: "filler-pod-" + string(uuid.NewUUID()),
-				Resources: &v1.ResourceRequirements{
-					Limits: v1.ResourceList{
-						v1.ResourceCPU: *resource.NewMilliQuantity(requestedCPU, "DecimalSI"),
-					},
-					Requests: v1.ResourceList{
-						v1.ResourceCPU: *resource.NewMilliQuantity(requestedCPU, "DecimalSI"),
-					},
-				},
-				Affinity: &v1.Affinity{
-					NodeAffinity: &v1.NodeAffinity{
-						RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
-							NodeSelectorTerms: []v1.NodeSelectorTerm{
-								{
-									MatchExpressions: []v1.NodeSelectorRequirement{
-										{
-											Key:      "node",
-											Operator: v1.NodeSelectorOpIn,
-											Values:   []string{nodeName},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			}))
-		}
-		// Wait for filler pods to schedule.
-		for _, pod := range fillerPods {
-			framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(cs, pod))
-		}
+		ginkgo.By("Starting Pods to consume most of the node's resource.")
+		// Create pod for the particular node which requires 70% of the remaining beard-seconds.
+		requestedLength := testnode.Status.Capacity[beardsecond] * 7 / 10
 
-		// Register a runtimeClass with overhead set as 30% of the nodeMaxAllocatable
+		fillerPod := createPausePod(f, pausePodConfig{
+			Name: "filler-pod-" + string(uuid.NewUUID()),
+			Resources: &v1.ResourceRequirements{
+				Requests: v1.ResourceList{bearsecond: resource.MustParse(requestedLength)},
+				Limits:   v1.ResourceList{bearsecond: resource.MustParse(requestedLength)},
+			},
+			NodeSelector: map[string]string{"test-key": testnode.Name},
+		})
+
+		// Wait for filler pod to schedule.
+		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(cs, fillerPod))
+
+		// Register a runtimeClass with overhead set as 30% of the available beard-seconds
 		rc := &v1beta1.RuntimeClass{
 			Handler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
 			Overhead: &v1beta1.Overhead{
 				PodFixed: v1.ResourceList{
-					v1.ResourceCPU: *resource.NewMilliQuantity(nodeMaxAllocatable*3/10, "DecimalSI"),
+					beardsecond: resource.MustParse(testnode.Status.Capacity[beardsecond] * 3 / 10),
 				},
 			},
 		}
@@ -303,20 +296,19 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		_, err = f.ClientSet.NodeV1beta1().RuntimeClasses().Create(rc)
 		framework.ExpectNoError(err, "failed to create RuntimeClass resource")
 
-		ginkgo.By("Creating another pod that requires unavailable amount of CPU.")
-		// Create another pod that requires 20% of the largest node CPU resources.
-		// This pod should remain pending as at least 70% of CPU of other nodes in
-		// the cluster are already consumed.
-		podName := "additional-pod"
+		ginkgo.By("Creating another pod that requires unavailable amount of resources.")
+		// Create another pod that requires 20% of available beard-seconds.
+		// This pod should remain pending as at least 70% of beard-second in
+		// the node are already consumed.
+		podName := "additional-pod" + string(uuid.NewUUID())
 		conf := pausePodConfig{
 			RuntimeClassHandler: e2enode.PreconfiguredRuntimeClassHandler(framework.TestContext.ContainerRuntime),
 			Name:                podName,
 			Labels:              map[string]string{"name": "additional"},
 			Resources: &v1.ResourceRequirements{
-				Limits: v1.ResourceList{
-					v1.ResourceCPU: *resource.NewMilliQuantity(nodeMaxAllocatable*2/10, "DecimalSI"),
-				},
+				Limits: v1.ResourceList{beardsecond: resource.MustParse(testnode.Status.Capacity[beardsecond] * 2 / 10)},
 			},
+			NodeSelector: map[string]string{"test-key": testnode.Name},
 		}
 		WaitForSchedulerAfterAction(f, createPausePodAction(f, conf), ns, podName, false)
 		verifyResult(cs, len(fillerPods), 1, ns)
