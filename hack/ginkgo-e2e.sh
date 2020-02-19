@@ -26,7 +26,8 @@ source "${KUBE_ROOT}/cluster/common.sh"
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
 # Find the ginkgo binary build as part of the release.
-ginkgo=$(kube::util::find-binary "ginkgo")
+#ginkgo=$(kube::util::find-binary "ginkgo")
+ginkgo="/home/eernst/go/bin/ginkgo"
 e2e_test=$(kube::util::find-binary "e2e.test")
 
 # --- Setup some env vars.
